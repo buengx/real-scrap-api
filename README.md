@@ -56,8 +56,9 @@ pip install -r requirements.txt
 Set an API key before exposing the service over the internet:
 
 ```bash
-export API_KEY="ec53878681c864dbc35b22c0e8b274421d10513c0f88c3cc8d248db123b5d03619c1cc0ac085e581a1c6dc852bfa088ad8c505f2bc9e4a0d79199c77b1604dc4b583bbffdf472fb671c40913c9a56dcbb3f9b7fcfd127e95955d6774cf27942b9c7e0f9ab487bb526a468cace5d73154aebce344ed28671ec3fde18a0f390f0bb5bbe1e6e12f57360f9f981b4e759fe16598a47358d22c398516c2b8feb4ad61b5b82d053713b14fbe330571d9193254c887f489b031e6bf88608700a78b79988c9cc4fbb626089b83a28ad9245a853af769beb61ba8aa2778c5f7c8e2237b25208e5a4b620a9dfc4364f7d00f18955866eba35016795aa0429a57a5fef7ad45" # <-- FOR EXAMPLE ONLY: Generated with 'openssl rand -hex 256'
+export API_KEY="example-local-api-key-not-a-real-secret"
 export DATABASE_PATH="./realestate.db"
+export SEARCH_MAX_PAGES=20
 ```
 
 Or copy `.env.example` and export the values yourself. The application does not automatically load `.env` files.
@@ -70,6 +71,10 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 The service listens on port `8000`.
+
+Interactive API docs are available at:
+
+- `http://localhost:8000/docs`
 
 ## Endpoints
 
@@ -97,7 +102,7 @@ Queues a scrape using the URL supplied in the JSON body. The request returns imm
 ```bash
 curl -X POST http://localhost:8000/scrape \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret" \
+  -H "X-API-Key: example-local-api-key-not-a-real-secret" \
   -d '{
     "url": "https://www.realestate.com.au/buy/size-1000/list-1?source=refinement&sourcePage=rea%3Abuy%3Asearch+result+-+list&sourceElement=search-box-search",
     "max_pages": 10
@@ -117,6 +122,82 @@ Response:
 `max_pages` must be between `1` and `100`. If the URL contains `/list-1`, the scraper changes it to `/list-2`, `/list-3`, and so on. It stops when a page has no listings or no new listing IDs.
 
 Only `realestate.com.au` URLs are accepted.
+
+### `POST /search`
+
+Builds a validated realestate.com.au search URL from JSON, then queues the existing scraper as a background task. It does **not** scrape synchronously; it only returns queued status and metadata. `maxPages` defaults to `1`, so only `list-1` is queued unless a higher value is provided.
+
+Request JSON fields (camelCase):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `suburb` | string (optional) | Non-empty when provided |
+| `state` | string (optional) | Non-empty when provided |
+| `postcode` | string or string[] (optional) | Single postcode only (`["3000"]` is accepted; multiple postcodes are rejected) |
+| `listingType` | string (required) | `buy` or `rent` only |
+| `minPrice` | number (optional) | Non-negative |
+| `maxPrice` | number (optional) | Non-negative |
+| `minBedrooms` | integer (optional) | Non-negative |
+| `maxBedrooms` | integer (optional) | Non-negative |
+| `minBathrooms` | integer (optional) | Non-negative (mapped to REA `numBaths`) |
+| `minCarSpaces` | integer (optional) | Non-negative (mapped to REA `numParkingSpaces`) |
+| `propertyType` | string or string[] (optional) | Supported: `house`, `townhouse`, `villa`, `land`, `acreage`, `retirement`, `apartment`, `unit`, `flat`, `apartment-unit+apartment` |
+| `maxPages` | integer (optional) | Default `1`, minimum `1`, maximum `SEARCH_MAX_PAGES` (default `20`) |
+
+Validation rules:
+
+- Rejects contradictory ranges such as `minPrice > maxPrice` or `minBedrooms > maxBedrooms`.
+- Rejects unsupported categories (for example `listingType: sold` or unknown `propertyType`).
+- Rejects empty strings and invalid field types.
+- `minPrice` without `maxPrice` is rejected (not reliably representable in the URL pattern used here).
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: example-local-api-key-not-a-real-secret" \
+  -d '{
+    "suburb": "South Yarra",
+    "state": "VIC",
+    "postcode": "3141",
+    "listingType": "buy",
+    "minPrice": 500000,
+    "maxPrice": 900000,
+    "minBedrooms": 2,
+    "maxBedrooms": 4,
+    "minBathrooms": 2,
+    "minCarSpaces": 1,
+    "propertyType": ["house", "apartment"],
+    "maxPages": 3
+  }'
+```
+
+Response:
+
+```json
+{
+  "status": "queued",
+  "url": "https://www.realestate.com.au/buy/property-house-apartment-unit+apartment-with-2-bedrooms-between-500000-900000-in-south+yarra,+vic+3141/list-1?source=refinement&maxBeds=4&numBaths=2&numParkingSpaces=1",
+  "max_pages": 3,
+  "listing_type": "buy",
+  "filters": {
+    "suburb": "South Yarra",
+    "state": "VIC",
+    "postcode": "3141",
+    "minPrice": 500000.0,
+    "maxPrice": 900000.0,
+    "minBedrooms": 2,
+    "maxBedrooms": 4,
+    "minBathrooms": 2,
+    "minCarSpaces": 1,
+    "propertyType": [
+      "house",
+      "apartment"
+    ]
+  }
+}
+```
 
 ### `GET /listings`
 
@@ -142,14 +223,14 @@ Example: listings with at least 1000 m², at least 2 bedrooms, and a price up to
 
 ```bash
 curl "http://localhost:8000/listings?min_area_m2=1000&min_bedrooms=2&max_price=1000000&limit=100" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret"
+  -H "X-API-Key: example-local-api-key-not-a-real-secret"
 ```
 
 Example: Brunswick listings:
 
 ```bash
 curl "http://localhost:8000/listings?address=Brunswick" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret"
+  -H "X-API-Key: example-local-api-key-not-a-real-secret"
 ```
 
 Response:
@@ -187,7 +268,7 @@ Returns one saved listing, including the raw source card HTML.
 
 ```bash
 curl http://localhost:8000/listings/151643624 \
-  -H "X-API-Key: replace-this-with-a-long-random-secret"
+  -H "X-API-Key: example-local-api-key-not-a-real-secret"
 ```
 
 Response:
@@ -232,8 +313,15 @@ Typical HTTP responses:
 
 - `400`: invalid URL, invalid `max_pages`, or invalid request input.
 - `401`: missing or incorrect `X-API-Key` when `API_KEY` is configured.
+- `422`: schema validation errors for `/search` input.
 - `404`: requested listing ID is not stored.
 - `502`/`5xx`: upstream fetch or server failure.
+
+## Endpoint differences
+
+- `/search`: accepts structured JSON filters, builds a realestate.com.au HTTPS URL, validates it, and queues background scraping.
+- `/scrape`: accepts a caller-provided realestate.com.au URL and queues background scraping.
+- `/listings` and `/listings/{listing_id}`: query previously stored SQLite data only.
 
 Example unauthorized response:
 
@@ -259,6 +347,7 @@ The database uses WAL mode and indexes common search fields. Back it up by copyi
 - There is no persistent job queue yet. FastAPI background tasks run inside the API process.
 - There is no automatic retry schedule.
 - Listing detail pages are not fetched; data currently comes from search result cards.
+- `/search` only supports a single postcode value at this time; multiple postcodes are rejected.
 - Do not expose this publicly without setting `API_KEY` and placing the service behind HTTPS/reverse proxy protection.
 
 If normal HTTP requests begin returning challenge pages, add a Playwright worker later and feed its resulting HTML into the same `parse_page()` function. Do not add OCR, screen-reader automation, or an LLM unless the site stops exposing the card data in HTML.
