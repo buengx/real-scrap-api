@@ -103,6 +103,51 @@ def test_search_rejects_invalid_values_and_types(client):
     )
     assert response.status_code == 422
 
+    # Non-string for string fields (suburb, state)
+    response = client.post(
+        "/search",
+        headers=auth_headers(),
+        json={"listingType": "buy", "suburb": 123},
+    )
+    assert response.status_code == 422
+
+    response = client.post(
+        "/search",
+        headers=auth_headers(),
+        json={"listingType": "buy", "state": ["VIC"]},
+    )
+    assert response.status_code == 422
+
+    # Invalid list items for postcode or propertyType
+    response = client.post(
+        "/search",
+        headers=auth_headers(),
+        json={"listingType": "buy", "postcode": [None]},
+    )
+    assert response.status_code == 422
+
+    response = client.post(
+        "/search",
+        headers=auth_headers(),
+        json={"listingType": "buy", "propertyType": [123]},
+    )
+    assert response.status_code == 422
+
+    # Fractional or out-of-range prices
+    response = client.post(
+        "/search",
+        headers=auth_headers(),
+        json={"listingType": "buy", "maxPrice": 500000.50},
+    )
+    assert response.status_code == 422
+
+    response = client.post(
+        "/search",
+        headers=auth_headers(),
+        json={"listingType": "buy", "maxPrice": 1_000_000_000},
+    )
+    assert response.status_code == 422
+
 
 def test_search_rejects_multiple_postcodes(client):
     response = client.post(
