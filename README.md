@@ -56,7 +56,7 @@ pip install -r requirements.txt
 Set an API key before exposing the service over the internet:
 
 ```bash
-export API_KEY="replace-with-a-long-random-secret"
+export API_KEY="example-local-api-key-not-a-real-secret"
 export DATABASE_PATH="./realestate.db"
 export SEARCH_MAX_PAGES=20
 ```
@@ -102,7 +102,7 @@ Queues a scrape using the URL supplied in the JSON body. The request returns imm
 ```bash
 curl -X POST http://localhost:8000/scrape \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret" \
+  -H "X-API-Key: example-local-api-key-not-a-real-secret" \
   -d '{
     "url": "https://www.realestate.com.au/buy/size-1000/list-1?source=refinement&sourcePage=rea%3Abuy%3Asearch+result+-+list&sourceElement=search-box-search",
     "max_pages": 10
@@ -125,7 +125,7 @@ Only `realestate.com.au` URLs are accepted.
 
 ### `POST /search`
 
-Builds a validated realestate.com.au search URL from JSON, then queues the existing scraper as a background task. It does **not** scrape synchronously; it only returns queued status and metadata.
+Builds a validated realestate.com.au search URL from JSON, then queues the existing scraper as a background task. It does **not** scrape synchronously; it only returns queued status and metadata. `maxPages` defaults to `1`, so only `list-1` is queued unless a higher value is provided.
 
 Request JSON fields (camelCase):
 
@@ -156,7 +156,7 @@ Example:
 ```bash
 curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret" \
+  -H "X-API-Key: example-local-api-key-not-a-real-secret" \
   -d '{
     "suburb": "South Yarra",
     "state": "VIC",
@@ -223,14 +223,14 @@ Example: listings with at least 1000 m², at least 2 bedrooms, and a price up to
 
 ```bash
 curl "http://localhost:8000/listings?min_area_m2=1000&min_bedrooms=2&max_price=1000000&limit=100" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret"
+  -H "X-API-Key: example-local-api-key-not-a-real-secret"
 ```
 
 Example: Brunswick listings:
 
 ```bash
 curl "http://localhost:8000/listings?address=Brunswick" \
-  -H "X-API-Key: replace-this-with-a-long-random-secret"
+  -H "X-API-Key: example-local-api-key-not-a-real-secret"
 ```
 
 Response:
@@ -268,7 +268,7 @@ Returns one saved listing, including the raw source card HTML.
 
 ```bash
 curl http://localhost:8000/listings/151643624 \
-  -H "X-API-Key: replace-this-with-a-long-random-secret"
+  -H "X-API-Key: example-local-api-key-not-a-real-secret"
 ```
 
 Response:

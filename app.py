@@ -14,7 +14,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./realestate.db")
 API_KEY = os.getenv("API_KEY", "")
 REAL_ESTATE_DOMAIN = "realestate.com.au"
-SEARCH_MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "20"))
+DEFAULT_SEARCH_MAX_PAGES = 20
+MAX_SEARCH_PRICE = 999_999_999
+SEARCH_MAX_PAGES = DEFAULT_SEARCH_MAX_PAGES
 USER_AGENT = os.getenv(
     "USER_AGENT",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -68,7 +70,21 @@ def init_db():
 
 @app.on_event("startup")
 def startup():
+    global SEARCH_MAX_PAGES
+    SEARCH_MAX_PAGES = parse_search_max_pages(os.getenv("SEARCH_MAX_PAGES"))
     init_db()
+
+
+def parse_search_max_pages(value: Optional[str]) -> int:
+    if value is None:
+        return DEFAULT_SEARCH_MAX_PAGES
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise RuntimeError("Invalid SEARCH_MAX_PAGES configuration: must be an integer >= 1") from exc
+    if parsed < 1:
+        raise RuntimeError("Invalid SEARCH_MAX_PAGES configuration: must be an integer >= 1")
+    return parsed
 
 
 def require_api_key(x_api_key: Optional[str] = Header(default=None)):
@@ -326,10 +342,23 @@ SUPPORTED_PROPERTY_TYPES = {
 def _clean_optional_text(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
+    if not isinstance(value, str):
+        raise ValueError("must be a string")
     value = value.strip()
     if not value:
         raise ValueError("must not be empty")
     return value
+
+
+def _normalize_price_bound(field_name: str, value: Optional[float]) -> Optional[int]:
+    if value is None:
+        return None
+    if not float(value).is_integer():
+        raise ValueError(f"{field_name} must be a whole number")
+    normalized_value = int(value)
+    if normalized_value > MAX_SEARCH_PRICE:
+        raise ValueError(f"{field_name} must be less than or equal to {MAX_SEARCH_PRICE}")
+    return normalized_value
 
 
 class SearchRequest(BaseModel):
@@ -344,7 +373,7 @@ class SearchRequest(BaseModel):
     minBathrooms: Optional[int] = Field(default=None, ge=0)
     minCarSpaces: Optional[int] = Field(default=None, ge=0)
     propertyType: Optional[str | list[str]] = None
-    maxPages: int = Field(default=1, ge=1, le=SEARCH_MAX_PAGES)
+    maxPages: int = Field(default=1, ge=1)
 
     @field_validator("suburb", "state", mode="before")
     @classmethod
@@ -357,9 +386,19 @@ class SearchRequest(BaseModel):
         if value is None:
             return None
         if isinstance(value, str):
-            return _clean_optional_text(value)
+            cleaned = _clean_optional_text(value)
+            if not re.fullmatch(r"\d{4}", cleaned):
+                raise ValueError("must be exactly 4 digits")
+            return cleaned
         if isinstance(value, list):
-            cleaned = [_clean_optional_text(item) for item in value]
+            cleaned = []
+            for item in value:
+                cleaned_item = _clean_optional_text(item)
+                if cleaned_item is None:
+                    raise ValueError("must contain postcode strings only")
+                if not re.fullmatch(r"\d{4}", cleaned_item):
+                    raise ValueError("must be exactly 4 digits")
+                cleaned.append(cleaned_item)
             if not cleaned:
                 raise ValueError("must contain at least one postcode")
             if len(cleaned) > 1:
@@ -380,19 +419,27 @@ class SearchRequest(BaseModel):
             cleaned = [_clean_optional_text(item) for item in value]
             if not cleaned:
                 raise ValueError("must contain at least one property type")
+            if any(item is None for item in cleaned):
+                raise ValueError("must contain property type strings only")
             return cleaned
         raise ValueError("must be a string or an array of strings")
 
     @model_validator(mode="after")
     def validate_ranges(self):
+        min_price = _normalize_price_bound("minPrice", self.minPrice)
+        max_price = _normalize_price_bound("maxPrice", self.maxPrice)
         if self.minPrice is not None and self.maxPrice is not None and self.minPrice > self.maxPrice:
             raise ValueError("minPrice cannot be greater than maxPrice")
         if self.minBedrooms is not None and self.maxBedrooms is not None and self.minBedrooms > self.maxBedrooms:
             raise ValueError("minBedrooms cannot be greater than maxBedrooms")
-        if self.minPrice is not None and self.maxPrice is None:
+        if min_price is not None and max_price is None:
             raise ValueError("maxPrice is required when minPrice is provided")
+        if min_price is not None and max_price is not None and min_price > max_price:
+            raise ValueError("minPrice cannot be greater than maxPrice")
         if self.postcode and self.suburb and not self.state:
             raise ValueError("state is required when suburb and postcode are both provided")
+        if self.maxPages > SEARCH_MAX_PAGES:
+            raise ValueError(f"maxPages must be between 1 and {SEARCH_MAX_PAGES}")
         return self
 
 
@@ -446,8 +493,10 @@ def build_search_url(request: SearchRequest) -> str:
         label = "bedroom" if request.minBedrooms == 1 else "bedrooms"
         path_parts.append(f"with-{request.minBedrooms}-{label}")
     if request.maxPrice is not None:
-        min_price = int(request.minPrice or 0)
-        max_price = int(request.maxPrice)
+        min_price = _normalize_price_bound("minPrice", request.minPrice) or 0
+        max_price = _normalize_price_bound("maxPrice", request.maxPrice)
+        if max_price is None:
+            raise HTTPException(status_code=422, detail="maxPrice is required when minPrice is provided")
         path_parts.append(f"between-{min_price}-{max_price}")
     if location:
         path_parts.append(f"in-{location}")
@@ -498,6 +547,8 @@ def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
 @app.post("/search", dependencies=[Depends(require_api_key)])
 def search(request: SearchRequest, background_tasks: BackgroundTasks):
     generated_url = build_search_url(request)
+    min_price = _normalize_price_bound("minPrice", request.minPrice)
+    max_price = _normalize_price_bound("maxPrice", request.maxPrice)
     background_tasks.add_task(scrape_url, generated_url, request.maxPages)
     return {
         "status": "queued",
@@ -508,8 +559,8 @@ def search(request: SearchRequest, background_tasks: BackgroundTasks):
             "suburb": request.suburb,
             "state": request.state,
             "postcode": request.postcode,
-            "minPrice": request.minPrice,
-            "maxPrice": request.maxPrice,
+            "minPrice": min_price,
+            "maxPrice": max_price,
             "minBedrooms": request.minBedrooms,
             "maxBedrooms": request.maxBedrooms,
             "minBathrooms": request.minBathrooms,
