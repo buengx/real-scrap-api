@@ -56,7 +56,7 @@ pip install -r requirements.txt
 Set an API key before exposing the service over the internet:
 
 ```bash
-export API_KEY="replace-this-with-a-long-random-secret"
+export API_KEY="ec53878681c864dbc35b22c0e8b274421d10513c0f88c3cc8d248db123b5d03619c1cc0ac085e581a1c6dc852bfa088ad8c505f2bc9e4a0d79199c77b1604dc4b583bbffdf472fb671c40913c9a56dcbb3f9b7fcfd127e95955d6774cf27942b9c7e0f9ab487bb526a468cace5d73154aebce344ed28671ec3fde18a0f390f0bb5bbe1e6e12f57360f9f981b4e759fe16598a47358d22c398516c2b8feb4ad61b5b82d053713b14fbe330571d9193254c887f489b031e6bf88608700a78b79988c9cc4fbb626089b83a28ad9245a853af769beb61ba8aa2778c5f7c8e2237b25208e5a4b620a9dfc4364f7d00f18955866eba35016795aa0429a57a5fef7ad45" # <-- FOR EXAMPLE ONLY: Generated with 'openssl rand -hex 256'
 export DATABASE_PATH="./realestate.db"
 ```
 
