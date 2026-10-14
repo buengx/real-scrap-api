@@ -9,6 +9,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse, quote_plus
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from playwright.sync_api import sync_playwright
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./realestate.db")
@@ -24,8 +25,7 @@ SCRAPE_LOCK = threading.Lock()
 
 USER_AGENT = os.getenv(
     "USER_AGENT",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
 )
 
 
@@ -298,35 +298,44 @@ def build_page_url(url: str, page_number: int) -> str:
 
 def scrape_url(url: str, max_pages: int = 1):
     validate_target_url(url)
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-AU,en;q=0.9",
-        "Cache-Control": "no-cache",
-    }
 
     with SCRAPE_LOCK:
         all_listings = []
         seen_ids = set()
-        with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
-            for page_number in range(1, max_pages + 1):
-                if page_number > 1 and PAGE_DELAY_SECONDS > 0:
-                    time.sleep(PAGE_DELAY_SECONDS)
-                page_url = build_page_url(url, page_number)
-                response = client.get(page_url)
-                response.raise_for_status()
-                listings = parse_page(response.text, str(response.url))
-                if not listings:
-                    break
+        with sync_playwright() as playwright:
+            browser = playwright.firefox.launch(headless=True)
+            try:
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-AU",
+                )
+                page = context.new_page()
+                for page_number in range(1, max_pages + 1):
+                    if page_number > 1 and PAGE_DELAY_SECONDS > 0:
+                        time.sleep(PAGE_DELAY_SECONDS)
+                    page_url = build_page_url(url, page_number)
+                    response = page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                    if response and response.status >= 400:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Upstream returned HTTP {response.status}",
+                        )
+                    html_content = page.content()
+                    listings = parse_page(html_content, page.url)
+                    if not listings:
+                        break
 
-                new_count = 0
-                for listing in listings:
-                    if listing["listing_id"] not in seen_ids:
-                        seen_ids.add(listing["listing_id"])
-                        all_listings.append(listing)
-                        new_count += 1
-                if new_count == 0:
-                    break
+                    new_count = 0
+                    for listing in listings:
+                        if listing["listing_id"] not in seen_ids:
+                            seen_ids.add(listing["listing_id"])
+                            all_listings.append(listing)
+                            new_count += 1
+                    if new_count == 0:
+                        break
+            finally:
+                browser.close()
 
         return save_listings(all_listings)
 
