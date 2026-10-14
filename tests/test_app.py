@@ -218,3 +218,72 @@ def test_existing_scrape_endpoint_still_works(client, scrape_calls):
 def test_scrape_requires_api_key(client):
     response = client.post("/scrape", json={"url": "https://www.realestate.com.au/buy/list-1", "max_pages": 1})
     assert response.status_code == 401
+
+
+import random
+
+
+def test_randomized_search_requests(client, scrape_calls):
+    suburbs_and_locations = [
+        ("South Yarra", "VIC", "3141"),
+        ("Richmond", "VIC", "3121"),
+        ("Surry Hills", "NSW", "2010"),
+        ("St Agnes", "SA", "5097"),
+        ("Brisbane City", "QLD", "4000"),
+        (None, None, None),
+    ]
+    listing_types = ["buy", "rent"]
+    property_types = ["house", "apartment", "unit", "townhouse", "villa", "land"]
+
+    random.seed(42)
+    for _ in range(10):
+        suburb, state, postcode = random.choice(suburbs_and_locations)
+        listing_type = random.choice(listing_types)
+
+        # Generate non-contradictory price bounds
+        min_price = random.choice([None, 100000, 300000, 500000])
+        if min_price is not None:
+            max_price = min_price + random.choice([100000, 200000, 500000])
+        else:
+            max_price = random.choice([None, 500000, 1000000])
+
+        # Generate non-contradictory bedroom bounds
+        min_beds = random.choice([None, 1, 2, 3])
+        if min_beds is not None:
+            max_beds = min_beds + random.choice([0, 1, 2])
+        else:
+            max_beds = random.choice([None, 2, 4])
+
+        min_baths = random.choice([None, 1, 2])
+        min_cars = random.choice([None, 1, 2])
+
+        selected_prop_types = random.sample(property_types, k=random.randint(0, 2))
+        prop_type_val = selected_prop_types if selected_prop_types else None
+
+        payload = {
+            "listingType": listing_type,
+        }
+        if suburb and state and postcode:
+            payload["suburb"] = suburb
+            payload["state"] = state
+            payload["postcode"] = postcode
+        if min_price is not None:
+            payload["minPrice"] = min_price
+        if max_price is not None:
+            payload["maxPrice"] = max_price
+        if min_beds is not None:
+            payload["minBedrooms"] = min_beds
+        if max_beds is not None:
+            payload["maxBedrooms"] = max_beds
+        if min_baths is not None:
+            payload["minBathrooms"] = min_baths
+        if min_cars is not None:
+            payload["minCarSpaces"] = min_cars
+        if prop_type_val:
+            payload["propertyType"] = prop_type_val
+
+        response = client.post("/search", headers=auth_headers(), json=payload)
+        assert response.status_code == 200, f"Failed for payload: {payload}, error: {response.text}"
+        data = response.json()
+        assert data["status"] == "queued"
+        assert data["url"].startswith(f"https://www.realestate.com.au/{listing_type}/")
