@@ -9,19 +9,39 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse, quote_plus
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from playwright.sync_api import sync_playwright
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./realestate.db")
 API_KEY = os.getenv("API_KEY", "")
 REAL_ESTATE_DOMAIN = "realestate.com.au"
+import threading
+import time
+
 DEFAULT_SEARCH_MAX_PAGES = 20
 MAX_SEARCH_PRICE = 999_999_999
-SEARCH_MAX_PAGES = DEFAULT_SEARCH_MAX_PAGES
+PAGE_DELAY_SECONDS = float(os.getenv("PAGE_DELAY_SECONDS", "10"))
+SCRAPE_LOCK = threading.Lock()
+
 USER_AGENT = os.getenv(
     "USER_AGENT",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
 )
+
+
+def parse_search_max_pages(value: Optional[str]) -> int:
+    if value is None:
+        return DEFAULT_SEARCH_MAX_PAGES
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise RuntimeError("Invalid SEARCH_MAX_PAGES configuration: must be an integer >= 1") from exc
+    if parsed < 1:
+        raise RuntimeError("Invalid SEARCH_MAX_PAGES configuration: must be an integer >= 1")
+    return parsed
+
+
+SEARCH_MAX_PAGES = parse_search_max_pages(os.getenv("SEARCH_MAX_PAGES"))
 
 app = FastAPI(title="Real Estate AU Scraper API", version="1.0.0")
 
@@ -73,18 +93,6 @@ def startup():
     global SEARCH_MAX_PAGES
     SEARCH_MAX_PAGES = parse_search_max_pages(os.getenv("SEARCH_MAX_PAGES"))
     init_db()
-
-
-def parse_search_max_pages(value: Optional[str]) -> int:
-    if value is None:
-        return DEFAULT_SEARCH_MAX_PAGES
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise RuntimeError("Invalid SEARCH_MAX_PAGES configuration: must be an integer >= 1") from exc
-    if parsed < 1:
-        raise RuntimeError("Invalid SEARCH_MAX_PAGES configuration: must be an integer >= 1")
-    return parsed
 
 
 def require_api_key(x_api_key: Optional[str] = Header(default=None)):
@@ -290,34 +298,46 @@ def build_page_url(url: str, page_number: int) -> str:
 
 def scrape_url(url: str, max_pages: int = 1):
     validate_target_url(url)
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-AU,en;q=0.9",
-        "Cache-Control": "no-cache",
-    }
 
-    all_listings = []
-    seen_ids = set()
-    with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
-        for page_number in range(1, max_pages + 1):
-            page_url = build_page_url(url, page_number)
-            response = client.get(page_url)
-            response.raise_for_status()
-            listings = parse_page(response.text, str(response.url))
-            if not listings:
-                break
+    with SCRAPE_LOCK:
+        all_listings = []
+        seen_ids = set()
+        with sync_playwright() as playwright:
+            browser = playwright.firefox.launch(headless=True)
+            try:
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-AU",
+                )
+                page = context.new_page()
+                for page_number in range(1, max_pages + 1):
+                    if page_number > 1 and PAGE_DELAY_SECONDS > 0:
+                        time.sleep(PAGE_DELAY_SECONDS)
+                    page_url = build_page_url(url, page_number)
+                    response = page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                    if response and response.status >= 400:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Upstream returned HTTP {response.status}",
+                        )
+                    html_content = page.content()
+                    listings = parse_page(html_content, page.url)
+                    if not listings:
+                        break
 
-            new_count = 0
-            for listing in listings:
-                if listing["listing_id"] not in seen_ids:
-                    seen_ids.add(listing["listing_id"])
-                    all_listings.append(listing)
-                    new_count += 1
-            if new_count == 0:
-                break
+                    new_count = 0
+                    for listing in listings:
+                        if listing["listing_id"] not in seen_ids:
+                            seen_ids.add(listing["listing_id"])
+                            all_listings.append(listing)
+                            new_count += 1
+                    if new_count == 0:
+                        break
+            finally:
+                browser.close()
 
-    return save_listings(all_listings)
+        return save_listings(all_listings)
 
 
 class ScrapeRequest(BaseModel):
@@ -344,10 +364,10 @@ def _clean_optional_text(value: Optional[str]) -> Optional[str]:
         return None
     if not isinstance(value, str):
         raise ValueError("must be a string")
-    value = value.strip()
-    if not value:
+    cleaned_value = value.strip()
+    if not cleaned_value:
         raise ValueError("must not be empty")
-    return value
+    return cleaned_value
 
 
 def _normalize_price_bound(field_name: str, value: Optional[float]) -> Optional[int]:
@@ -391,16 +411,16 @@ class SearchRequest(BaseModel):
                 raise ValueError("must be exactly 4 digits")
             return cleaned
         if isinstance(value, list):
+            if not value:
+                raise ValueError("must contain at least one postcode")
             cleaned = []
             for item in value:
-                cleaned_item = _clean_optional_text(item)
-                if cleaned_item is None:
+                if item is None:
                     raise ValueError("must contain postcode strings only")
+                cleaned_item = _clean_optional_text(item)
                 if not re.fullmatch(r"\d{4}", cleaned_item):
                     raise ValueError("must be exactly 4 digits")
                 cleaned.append(cleaned_item)
-            if not cleaned:
-                raise ValueError("must contain at least one postcode")
             if len(cleaned) > 1:
                 raise ValueError(
                     "multiple postcodes are not supported by /search URL builder; provide a single postcode"
@@ -416,30 +436,34 @@ class SearchRequest(BaseModel):
         if isinstance(value, str):
             return _clean_optional_text(value)
         if isinstance(value, list):
-            cleaned = [_clean_optional_text(item) for item in value]
-            if not cleaned:
+            if not value:
                 raise ValueError("must contain at least one property type")
-            if any(item is None for item in cleaned):
-                raise ValueError("must contain property type strings only")
+            cleaned = []
+            for item in value:
+                if item is None:
+                    raise ValueError("must contain property type strings only")
+                cleaned.append(_clean_optional_text(item))
             return cleaned
         raise ValueError("must be a string or an array of strings")
 
     @model_validator(mode="after")
     def validate_ranges(self):
-        min_price = _normalize_price_bound("minPrice", self.minPrice)
-        max_price = _normalize_price_bound("maxPrice", self.maxPrice)
+        norm_min_price = _normalize_price_bound("minPrice", self.minPrice)
+        norm_max_price = _normalize_price_bound("maxPrice", self.maxPrice)
         if self.minPrice is not None and self.maxPrice is not None and self.minPrice > self.maxPrice:
             raise ValueError("minPrice cannot be greater than maxPrice")
         if self.minBedrooms is not None and self.maxBedrooms is not None and self.minBedrooms > self.maxBedrooms:
             raise ValueError("minBedrooms cannot be greater than maxBedrooms")
-        if min_price is not None and max_price is None:
+        if norm_min_price is not None and norm_max_price is None:
             raise ValueError("maxPrice is required when minPrice is provided")
-        if min_price is not None and max_price is not None and min_price > max_price:
+        if norm_min_price is not None and norm_max_price is not None and norm_min_price > norm_max_price:
             raise ValueError("minPrice cannot be greater than maxPrice")
         if self.postcode and self.suburb and not self.state:
             raise ValueError("state is required when suburb and postcode are both provided")
         if self.maxPages > SEARCH_MAX_PAGES:
             raise ValueError(f"maxPages must be between 1 and {SEARCH_MAX_PAGES}")
+        self.minPrice = norm_min_price
+        self.maxPrice = norm_max_price
         return self
 
 
