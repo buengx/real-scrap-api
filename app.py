@@ -25,7 +25,7 @@ SCRAPE_LOCK = threading.Lock()
 
 USER_AGENT = os.getenv(
     "USER_AGENT",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
 )
 
 
@@ -168,7 +168,7 @@ def detect_listing_type(url: str) -> str:
 
 def parse_card(card, page_url: str):
     link = card.select_one("a[href*='/property-']")
-    address_element = card.select_one(".residential-card__address-heading a")
+    address_element = card.select_one(".residential-card__details-link") or card.select_one(".residential-card__address-heading a") or link
     price_element = card.select_one(".property-price")
 
     if not link or not address_element:
@@ -303,7 +303,7 @@ def scrape_url(url: str, max_pages: int = 1):
         all_listings = []
         seen_ids = set()
         with sync_playwright() as playwright:
-            browser = playwright.firefox.launch(headless=True)
+            browser = playwright.chromium.launch(headless=True)
             try:
                 context = browser.new_context(
                     user_agent=USER_AGENT,
