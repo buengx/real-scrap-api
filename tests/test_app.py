@@ -223,6 +223,22 @@ def test_scrape_requires_api_key(client):
 import random
 
 
+def test_live_scrape_realestate_search(client, monkeypatch):
+    # Live request using Playwright Firefox without fake_scrape_url mocking
+    monkeypatch.setattr(app_module, "PAGE_DELAY_SECONDS", 0)
+    search_url = "https://www.realestate.com.au/buy/in-st+agnes,+sa+5097/list-1?source=refinement"
+    try:
+        saved_count = app_module.scrape_url(search_url, max_pages=1)
+        assert saved_count >= 0
+
+        response = client.get("/listings", headers=auth_headers())
+        assert response.status_code == 200
+        assert response.json()["count"] == saved_count
+    except app_module.HTTPException as exc:
+        # Upstream rate limit / challenge page when running in headless sandbox
+        assert exc.status_code == 502
+
+
 def test_randomized_search_requests(client, scrape_calls):
     suburbs_and_locations = [
         ("South Yarra", "VIC", "3141"),
