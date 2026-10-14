@@ -14,11 +14,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./realestate.db")
 API_KEY = os.getenv("API_KEY", "")
 REAL_ESTATE_DOMAIN = "realestate.com.au"
+import threading
 import time
 
 DEFAULT_SEARCH_MAX_PAGES = 20
 MAX_SEARCH_PRICE = 999_999_999
 PAGE_DELAY_SECONDS = float(os.getenv("PAGE_DELAY_SECONDS", "10"))
+SCRAPE_LOCK = threading.Lock()
 
 USER_AGENT = os.getenv(
     "USER_AGENT",
@@ -303,29 +305,30 @@ def scrape_url(url: str, max_pages: int = 1):
         "Cache-Control": "no-cache",
     }
 
-    all_listings = []
-    seen_ids = set()
-    with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
-        for page_number in range(1, max_pages + 1):
-            if page_number > 1 and PAGE_DELAY_SECONDS > 0:
-                time.sleep(PAGE_DELAY_SECONDS)
-            page_url = build_page_url(url, page_number)
-            response = client.get(page_url)
-            response.raise_for_status()
-            listings = parse_page(response.text, str(response.url))
-            if not listings:
-                break
+    with SCRAPE_LOCK:
+        all_listings = []
+        seen_ids = set()
+        with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
+            for page_number in range(1, max_pages + 1):
+                if page_number > 1 and PAGE_DELAY_SECONDS > 0:
+                    time.sleep(PAGE_DELAY_SECONDS)
+                page_url = build_page_url(url, page_number)
+                response = client.get(page_url)
+                response.raise_for_status()
+                listings = parse_page(response.text, str(response.url))
+                if not listings:
+                    break
 
-            new_count = 0
-            for listing in listings:
-                if listing["listing_id"] not in seen_ids:
-                    seen_ids.add(listing["listing_id"])
-                    all_listings.append(listing)
-                    new_count += 1
-            if new_count == 0:
-                break
+                new_count = 0
+                for listing in listings:
+                    if listing["listing_id"] not in seen_ids:
+                        seen_ids.add(listing["listing_id"])
+                        all_listings.append(listing)
+                        new_count += 1
+                if new_count == 0:
+                    break
 
-    return save_listings(all_listings)
+        return save_listings(all_listings)
 
 
 class ScrapeRequest(BaseModel):
