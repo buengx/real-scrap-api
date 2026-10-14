@@ -14,8 +14,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./realestate.db")
 API_KEY = os.getenv("API_KEY", "")
 REAL_ESTATE_DOMAIN = "realestate.com.au"
+import time
+
 DEFAULT_SEARCH_MAX_PAGES = 20
 MAX_SEARCH_PRICE = 999_999_999
+PAGE_DELAY_SECONDS = float(os.getenv("PAGE_DELAY_SECONDS", "10"))
 
 USER_AGENT = os.getenv(
     "USER_AGENT",
@@ -304,6 +307,8 @@ def scrape_url(url: str, max_pages: int = 1):
     seen_ids = set()
     with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
         for page_number in range(1, max_pages + 1):
+            if page_number > 1 and PAGE_DELAY_SECONDS > 0:
+                time.sleep(PAGE_DELAY_SECONDS)
             page_url = build_page_url(url, page_number)
             response = client.get(page_url)
             response.raise_for_status()
@@ -347,10 +352,10 @@ def _clean_optional_text(value: Optional[str]) -> Optional[str]:
         return None
     if not isinstance(value, str):
         raise ValueError("must be a string")
-    value = value.strip()
-    if not value:
+    cleaned_value = value.strip()
+    if not cleaned_value:
         raise ValueError("must not be empty")
-    return value
+    return cleaned_value
 
 
 def _normalize_price_bound(field_name: str, value: Optional[float]) -> Optional[int]:
